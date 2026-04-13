@@ -675,10 +675,13 @@ def application(environ, start_response):
 
 
 def run():
+import os
+
+def run():
     initialize_database()
     port = int(os.environ.get("PORT", 8000))
-with make_server("0.0.0.0", port, application) as server:
-        print("Servidor ativo em http://127.0.0.1:8000")
+    with make_server("0.0.0.0", port, application) as server:
+        print(f"Servidor ativo em http://0.0.0.0:{port}")
         server.serve_forever()
 
 
