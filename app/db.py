@@ -8,7 +8,8 @@ from pathlib import Path
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DB_PATH = BASE_DIR / "data" / "app.db"
+import os
+DB_PATH = Path(os.environ.get("DB_PATH", str(BASE_DIR / "data" / "app.db")))
 
 
 RECEIVE_METHODS_SEED = [
