@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: nutripoint-finance
+    runtime: python
+    buildCommand: ""
+    startCommand: python run.py
+    disk:
+      name: nutripoint-data
+      mountPath: /data
+      sizeGB: 1
