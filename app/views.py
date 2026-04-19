@@ -922,6 +922,8 @@ def references_page(user, context: dict) -> bytes:
                 </table>
             </div>
         </article>
+    </section>
+    <section class="panel-grid">
         <article class="panel">
             <h2>Formas de recebimento</h2>
             <form method="post" action="/admin/referencias/recebimentos/salvar" class="form-grid">
