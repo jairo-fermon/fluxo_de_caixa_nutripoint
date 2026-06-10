@@ -1,3 +1,4 @@
+import json
 from datetime import date
 from http import cookies
 from pathlib import Path
@@ -47,6 +48,7 @@ from app.db import (
     update_user_role,
     verify_password,
 )
+from app.receipt_parser import analyze_receipt_text
 from app.views import (
     audit_page,
     cash_entries_page,
@@ -80,6 +82,15 @@ def parse_query(environ):
     return {key: values[0] for key, values in parsed.items()}
 
 
+def parse_json(environ):
+    try:
+        size = int(environ.get("CONTENT_LENGTH") or 0)
+    except ValueError:
+        size = 0
+    raw = environ["wsgi.input"].read(size).decode("utf-8") if size else "{}"
+    return json.loads(raw or "{}")
+
+
 def read_cookie(environ, name: str):
     raw_cookie = environ.get("HTTP_COOKIE", "")
     if not raw_cookie:
@@ -93,6 +104,15 @@ def read_cookie(environ, name: str):
 def html_response(start_response, body: bytes, status="200 OK", headers=None):
     headers = headers or []
     response_headers = [("Content-Type", "text/html; charset=utf-8"), ("Content-Length", str(len(body)))]
+    response_headers.extend(headers)
+    start_response(status, response_headers)
+    return [body]
+
+
+def json_response(start_response, payload: dict, status="200 OK", headers=None):
+    headers = headers or []
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    response_headers = [("Content-Type", "application/json; charset=utf-8"), ("Content-Length", str(len(body)))]
     response_headers.extend(headers)
     start_response(status, response_headers)
     return [body]
@@ -365,6 +385,33 @@ def application(environ, start_response):
         log_access(user, environ, "lancamentos")
         context = build_entries_context(parse_query(environ))
         return html_response(start_response, cash_entries_page(user, context))
+
+    if path == "/lancamentos/cupom/analisar" and method == "POST":
+        user, response = require_auth(environ, start_response)
+        if response:
+            return response
+        try:
+            payload = parse_json(environ)
+            ocr_text = (payload.get("ocr_text") or "").strip()
+            suggestion = analyze_receipt_text(
+                ocr_text,
+                [dict(item) for item in list_categories()],
+                [dict(item) for item in list_payment_methods()],
+            )
+            create_audit_log(
+                "cupom_analisado",
+                "lancamento",
+                user=user,
+                details="Análise automática de cupom fiscal executada.",
+                ip_address=client_ip(environ),
+            )
+            return json_response(start_response, {"ok": True, "suggestion": suggestion})
+        except Exception:
+            return json_response(
+                start_response,
+                {"ok": False, "error": "Não foi possível analisar o cupom."},
+                status="400 Bad Request",
+            )
 
     if path == "/lancamentos/salvar" and method == "POST":
         user, response = require_auth(environ, start_response)
@@ -675,13 +722,9 @@ def application(environ, start_response):
 
 
 def run():
-import os
-
-def run():
     initialize_database()
-    port = int(os.environ.get("PORT", 8000))
-    with make_server("0.0.0.0", port, application) as server:
-        print(f"Servidor ativo em http://0.0.0.0:{port}")
+    with make_server("127.0.0.1", 8000, application) as server:
+        print("Servidor ativo em http://127.0.0.1:8000")
         server.serve_forever()
 
 

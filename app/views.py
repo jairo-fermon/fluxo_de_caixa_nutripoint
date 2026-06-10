@@ -170,10 +170,12 @@ def render_layout(title: str, content: str, user=None, flash: str = "", flash_ki
         </div>
         """
     else:
-        user_box = f'<div class="topbar topbar-auth"><div></div>{theme_toggle}</div>'
+        user_box = ""
 
     flash_class = "flash flash-error" if flash_kind == "error" else "flash"
     flash_html = f'<div class="{flash_class}">{escape(flash)}</div>' if flash else ""
+
+    floating_toggle = "" if user else f'<div class="auth-theme-toggle">{theme_toggle}</div>'
 
     html = f"""<!DOCTYPE html>
 <html lang="pt-BR">
@@ -184,6 +186,7 @@ def render_layout(title: str, content: str, user=None, flash: str = "", flash_ki
     <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body class="{body_class}">
+    {floating_toggle}
     {navigation}
     <main class="main">
         {user_box}
@@ -393,7 +396,11 @@ def cash_entries_page(user, context: dict) -> bytes:
     <section class="panel">
         <article>
             <h2>Lançamento financeiro</h2>
-            <p>Estrutura inspirada nas abas <code>INSERIR</code> e <code>Movimentacoes (2)</code>.</p>
+            <div class="receipt-tools">
+                <button type="button" class="button button-secondary" id="receipt-scan-button">Fotografar cupom</button>
+                <input type="file" id="receipt-file-input" accept="image/*" capture="environment" hidden>
+                <span class="receipt-status" id="receipt-status">A foto tenta preencher o formulário atual, mas nada é salvo sem a sua confirmação.</span>
+            </div>
             {edit_notice}
             <form method="post" action="/lancamentos/salvar" class="form-grid two-columns">
                 <input type="hidden" name="id" value="{entry['id'] if entry else ''}">
@@ -517,8 +524,20 @@ def cash_entries_page(user, context: dict) -> bytes:
       const paymentSelect = document.getElementById('payment_method_despesa');
       const hiddenMethod = document.getElementById('payment_method');
       const paymentDateInput = document.querySelector('input[name="payment_date"]');
+      const factDateInput = document.querySelector('input[name="fact_date"]');
+      const grossAmountInput = document.querySelector('input[name="gross_amount"]');
+      const notesInput = document.querySelector('textarea[name="notes"]');
+      const statusSelect = document.querySelector('select[name="status"]');
       const competenceHidden = document.getElementById('competence_month');
       const competenceDisplay = document.getElementById('competence_month_display');
+      const receiptButton = document.getElementById('receipt-scan-button');
+      const receiptInput = document.getElementById('receipt-file-input');
+      const receiptStatus = document.getElementById('receipt-status');
+
+      function updateReceiptStatus(message, kind) {{
+        receiptStatus.textContent = message;
+        receiptStatus.dataset.kind = kind || 'info';
+      }}
 
       function updateCompetence() {{
         const raw = paymentDateInput.value;
@@ -571,12 +590,115 @@ def cash_entries_page(user, context: dict) -> bytes:
         }}
       }}
 
+      function setFieldValue(field, value) {{
+        if (!field || value === undefined || value === null || value === '') {{
+          return;
+        }}
+        field.value = value;
+        field.dispatchEvent(new Event('change', {{ bubbles: true }}));
+      }}
+
+      function applyReceiptSuggestion(suggestion) {{
+        if (!suggestion) {{
+          return;
+        }}
+        setFieldValue(factDateInput, suggestion.fact_date || '');
+        setFieldValue(paymentDateInput, suggestion.payment_date || '');
+        setFieldValue(grossAmountInput, suggestion.gross_amount || '');
+        setFieldValue(statusSelect, suggestion.status || 'planejado');
+        setFieldValue(entryType, suggestion.entry_type || '');
+        if ((suggestion.entry_type || '') === 'RECEITA') {{
+          setFieldValue(revenueSelect, suggestion.category_name || '');
+          setFieldValue(receiveSelect, suggestion.payment_method || '');
+        }} else if ((suggestion.entry_type || '') === 'DESPESA') {{
+          setFieldValue(expenseSelect, suggestion.category_name || '');
+          if (suggestion.dre_group) {{
+            expenseGroupSelect.value = suggestion.dre_group;
+          }}
+          setFieldValue(paymentSelect, suggestion.payment_method || '');
+        }}
+        if (notesInput && suggestion.notes) {{
+          notesInput.value = suggestion.notes;
+        }}
+        syncForm();
+        updateCompetence();
+      }}
+
+      function ensureTesseract() {{
+        if (window.Tesseract && window.Tesseract.createWorker) {{
+          return Promise.resolve(window.Tesseract);
+        }}
+        return new Promise((resolve, reject) => {{
+          const existing = document.querySelector('script[data-tesseract]');
+          if (existing) {{
+            existing.addEventListener('load', () => resolve(window.Tesseract));
+            existing.addEventListener('error', reject);
+            return;
+          }}
+          const script = document.createElement('script');
+          script.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+          script.dataset.tesseract = 'true';
+          script.onload = () => resolve(window.Tesseract);
+          script.onerror = () => reject(new Error('Falha ao carregar o OCR.'));
+          document.head.appendChild(script);
+        }});
+      }}
+
+      async function readReceiptText(file) {{
+        const Tesseract = await ensureTesseract();
+        const worker = await Tesseract.createWorker('por');
+        try {{
+          const result = await worker.recognize(file);
+          return (result && result.data && result.data.text) || '';
+        }} finally {{
+          await worker.terminate();
+        }}
+      }}
+
+      async function analyzeReceiptText(ocrText) {{
+        const response = await fetch('/lancamentos/cupom/analisar', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ ocr_text: ocrText }})
+        }});
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) {{
+          throw new Error(payload.error || 'Não foi possível analisar o cupom.');
+        }}
+        return payload.suggestion;
+      }}
+
+      async function handleReceiptFile(file) {{
+        if (!file) {{
+          return;
+        }}
+        updateReceiptStatus('Lendo a foto do cupom. Isso pode levar alguns segundos...', 'loading');
+        receiptButton.disabled = true;
+        try {{
+          const ocrText = await readReceiptText(file);
+          if (!ocrText.trim()) {{
+            updateReceiptStatus('Não consegui ler o cupom. O formulário continua disponível para preenchimento manual.', 'warning');
+            return;
+          }}
+          const suggestion = await analyzeReceiptText(ocrText);
+          applyReceiptSuggestion(suggestion);
+          updateReceiptStatus('Cupom lido. Revise os campos preenchidos e complete o que faltar antes de salvar.', 'success');
+        }} catch (error) {{
+          updateReceiptStatus('Não foi possível preencher automaticamente. Você pode completar os campos manualmente.', 'error');
+        }} finally {{
+          receiptButton.disabled = false;
+          receiptInput.value = '';
+        }}
+      }}
+
       entryType.addEventListener('change', syncForm);
       revenueSelect.addEventListener('change', syncForm);
       receiveSelect.addEventListener('change', syncForm);
       expenseSelect.addEventListener('change', syncForm);
       paymentSelect.addEventListener('change', syncForm);
       paymentDateInput.addEventListener('change', updateCompetence);
+      receiptButton.addEventListener('click', () => receiptInput.click());
+      receiptInput.addEventListener('change', (event) => handleReceiptFile(event.target.files[0]));
       expenseGroupSelect.setAttribute('disabled', 'disabled');
       updateCompetence();
       syncForm();
@@ -922,8 +1044,6 @@ def references_page(user, context: dict) -> bytes:
                 </table>
             </div>
         </article>
-    </section>
-    <section class="panel-grid">
         <article class="panel">
             <h2>Formas de recebimento</h2>
             <form method="post" action="/admin/referencias/recebimentos/salvar" class="form-grid">
